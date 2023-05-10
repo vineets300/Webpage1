@@ -1,6 +1,6 @@
 #Define the provider
 provider "aws" {
-    region = "ap-southeast-1"
+    region = "us-east-1"
 }
 
 #Create a virtual network
@@ -101,7 +101,7 @@ resource "local_file" "Web-Key" {
 
 #Create your webserver instance
 resource "aws_instance" "Web" {
-    ami = "ami-0adbe59da7d24a349"
+    ami = "ami-03c7d01cf4dedc891"
     instance_type = "t2.micro"
     tags = {
         Name = "WebServer1"
@@ -119,6 +119,7 @@ resource "aws_instance" "Web" {
         host = aws_instance.Web[0].public_ip
     }    
     inline = [
+       "sudo yum update -y",
        "sudo yum install httpd  php git -y",
        "sudo systemctl restart httpd",
        "sudo systemctl enable httpd",
@@ -164,61 +165,75 @@ resource "null_resource" "nullmount" {
   }
 }
 
-#Define S3 ID
-locals {
- s3_origin_id = "s3-origin"
+#Create Origin Access Identity for Cloudfront distribution
+resource "aws_cloudfront_origin_access_identity" "oai" {
+  comment = "access-identity-demonewbucket123456.s3.amazonaws.com"
 }
 
 #Create a bucket to upload your static data like images
 resource "aws_s3_bucket" "demonewbucket12345" {
-  bucket = "demonewbucket12345"
-  acl    = "public-read-write"
-  region = "ap-southeast-1"
-  
-  versioning {
-    enabled = true
-  }
+  bucket = "demonewbucket123456"
 
   tags = {
-    Name = "demonewbucket12345"
+    Name = "demonewbucket123456"
     Environment = "Prod"
   }
 
  provisioner "local-exec" {
     command = "git clone https://github.com/vineets300/Webpage1.git web-server-image"
  }
-
 }
 
-#Allow public access to the bucket
-resource "aws_s3_bucket_public_access_block" "public_storage" {
- depends_on = [aws_s3_bucket.demonewbucket12345]
- bucket = "demonewbucket12345"
- block_public_acls = false
- block_public_policy = false
+#Create a data block with S3 bucket policy
+data "aws_iam_policy_document" "demonewbucket12345_s3_policy_data" {
+  version = "2008-10-17"
+  statement {
+    sid = "1"
+    actions = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.demonewbucket12345.arn}/*"]
+    principals {
+      type = "AWS"
+      identifiers = [aws_cloudfront_origin_access_identity.oai.iam_arn]
+    }
+  }
+}
+
+#Attach S3 bucket policy to S3 bucket
+resource "aws_s3_bucket_policy" "demonewbucket12345_bucket_s3_policy" {
+  bucket = aws_s3_bucket.demonewbucket12345.id
+  policy = data.aws_iam_policy_document.demonewbucket12345_s3_policy_data.json
+}
+
+#Provide the details of the public access of bucket
+resource "aws_s3_bucket_public_access_block" "demonewbucket12345_public_block_access" {
+  bucket = aws_s3_bucket.demonewbucket12345.id
+  block_public_acls = true
+  block_public_policy = true
 }
 
 #Upload your data to S3 bucket
-resource "aws_s3_bucket_object" "Object1" {
+resource "aws_s3_object" "Object1" {
   depends_on = [aws_s3_bucket.demonewbucket12345]
-  bucket = "demonewbucket12345"
-  acl    = "public-read-write"
+  bucket = "demonewbucket123456"
   key = "Demo1.PNG"
   source = "web-server-image/Demo1.PNG"
 }
 
 #Create a Cloudfront distribution for CDN
 resource "aws_cloudfront_distribution" "tera-cloufront1" {
-    depends_on = [ aws_s3_bucket_object.Object1]
+    depends_on = [ aws_s3_object.Object1]
     origin {
         domain_name = aws_s3_bucket.demonewbucket12345.bucket_regional_domain_name
-        origin_id = local.s3_origin_id
-    }   
+        origin_id = aws_s3_bucket.demonewbucket12345.id
+        s3_origin_config {
+          origin_access_identity = aws_cloudfront_origin_access_identity.oai.cloudfront_access_identity_path
+        }
+    }
     enabled = true
       default_cache_behavior {
         allowed_methods = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
         cached_methods = ["GET", "HEAD"]
-        target_origin_id = local.s3_origin_id
+        target_origin_id = aws_s3_bucket.demonewbucket12345.id
 
         forwarded_values {
             query_string = false
@@ -227,7 +242,7 @@ resource "aws_cloudfront_distribution" "tera-cloufront1" {
                forward = "none"
             }
         }
-        viewer_protocol_policy = "allow-all"
+        viewer_protocol_policy = "redirect-to-https"
         min_ttl = 0
         default_ttl = 3600
         max_ttl = 86400
@@ -241,8 +256,7 @@ resource "aws_cloudfront_distribution" "tera-cloufront1" {
 
      viewer_certificate {
         cloudfront_default_certificate = true
-
-    } 
+    }
 }
 
 #Update the CDN image URL to your webserver code.
@@ -257,7 +271,7 @@ resource "null_resource" "Write_Image" {
   provisioner "remote-exec" {
         inline = [
             "sudo su << EOF",
-                    "echo \"<img src='http://${aws_cloudfront_distribution.tera-cloufront1.domain_name}/${aws_s3_bucket_object.Object1.key}' width='300' height='380'>\" >>/var/www/html/index.html",
+                    "echo \"<img src='http://${aws_cloudfront_distribution.tera-cloufront1.domain_name}/${aws_s3_object.Object1.key}' width='844' height='477'>\" >>/var/www/html/index.html",
                     "echo \"</body>\" >>/var/www/html/index.html",
                     "echo \"</html>\" >>/var/www/html/index.html",
                     "EOF",    
